@@ -1,3 +1,7 @@
+# ===========================
+# FILE 2: fitcorrect_core.py
+# (Your code + minimal CLI wrapper)
+# ===========================
 import cv2
 import mediapipe as mp
 import math
@@ -611,7 +615,6 @@ def within_hit(cur, base, tol, ex_name, difficulty):
     return within(cur, base, tol * scale * mult)
 
 def too_deep(cur, hit_base, difficulty):
-    # Smaller angle = deeper. So "too deep" if cur < hit_base - margin
     margin = float(ROM_DEEP_MARGIN_DEG.get(difficulty, 7.0))
     return cur < (hit_base - margin)
 
@@ -624,7 +627,6 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
     if not ex:
         return None, None, "Not calibrated"
 
-    # ---------------- SQUAT ----------------
     if title == "Bodyweight Squat":
         ok_pl, msg = plausibility_squat(lm)
         if not ok_pl:
@@ -634,19 +636,13 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
         hip  = smooth_push(smoothers["squat_hip"],  metric_squat_hip(lm))
         toe  = smooth_push(smoothers["squat_toe"],  metric_squat_toe_out(lm))
 
-        # hard block standing
         if knee > 150.0:
             return False, False, f"Not squatting (knee {knee:.0f}°)"
 
-        # form constraints
         ok_hip = (SQUAT_HIP_MIN <= hip <= SQUAT_HIP_MAX)
         ok_toe = (SQUAT_TOE_MIN <= toe <= SQUAT_TOE_MAX)
 
         hit = float(ex["hit_deg"]); tol = float(ex["tol"])
-
-        # ROM window:
-        # - must hit calibrated depth (within tolerance)
-        # - must NOT go deeper than calibration (beyond margin)
         deep_bad = too_deep(knee, hit, difficulty)
         ok_hit_knee = within_hit(knee, hit, tol, title, difficulty) and (not deep_bad)
 
@@ -659,7 +655,6 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
             info = f"Knee {knee:.0f}° (hit {hit:.0f}±{tol:.0f}) | Hip {hip:.0f}°(90-120) | Toe {toe:.0f}°(15-45)"
         return ok_now, ok_hit, info
 
-    # ---------------- LUNGE ----------------
     if title == "Lunge":
         ok_pl, msg = plausibility_lunge(lm)
         if not ok_pl:
@@ -671,7 +666,6 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
         cur_min = min(lk, rk)
 
         hit = float(ex["hit_deg"]); tol = float(ex["tol"])
-
         deep_bad = too_deep(cur_min, hit, difficulty)
         ok_hit = within_hit(cur_min, hit, tol, title, difficulty) and (not deep_bad)
         ok_now = ok_hit
@@ -682,7 +676,6 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
             info = f"L {lk:.0f}° | R {rk:.0f}° (hit {hit:.0f}±{tol:.0f})"
         return ok_now, ok_hit, info
 
-    # ---------------- PUSH-UP ----------------
     if title == "Push-Up":
         ok_pl, msg = plausibility_pushup(lm)
         if not ok_pl:
@@ -701,7 +694,6 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
             info = f"Elbow {elbow:.0f}° (hit {hit:.0f}±{tol:.0f})"
         return ok_now, ok_hit, info
 
-    # ---------------- SIT-UP ----------------
     if title == "Sit-Up":
         ok_pl, msg = plausibility_situp(lm)
         if not ok_pl:
@@ -720,7 +712,6 @@ def evaluate_exercise_hit(title: str, lm, profile: dict, difficulty: str, smooth
             info = f"Knee {knee:.0f}° (hit {hit:.0f}±{tol:.0f})"
         return ok_now, ok_hit, info
 
-    # ---------------- TREE ----------------
     if title == "Tree Pose":
         ok_pl, msg = plausibility_tree(lm)
         if not ok_pl:
@@ -748,7 +739,6 @@ def reset_rep(st):
     st["hit"] = False
 
 def update_squat_rep(st, knee_val, hit_knee):
-    # Start when bending toward hit; end when standing.
     down_th = min(hit_knee + 20.0, 140.0)
     up_th   = max(hit_knee + 45.0, 160.0)
 
@@ -785,7 +775,7 @@ def update_lunge_rep(st, lk, rk, hit_knee):
     up_th = min(hit_knee + 75.0, 175.0)
 
     in_down = (min(lk, rk) <= down_th)
-    in_up = (lk >= up_th and rk >= up_th)  # end only when both straighten
+    in_up = (lk >= up_th and rk >= up_th)
 
     if st["phase"] == "up" and in_down:
         st["phase"] = "down"
@@ -951,9 +941,41 @@ def exercise_loop(camera_index=0, user=DEFAULT_USER, difficulty="Standard", prof
 
 
 # ============================================================
-# QUICK START
+# QUICK START (UPDATED: reads profile.json + supports --calibrate)
 # ============================================================
 if __name__ == "__main__":
-    # Run once:
-    # calibration_phase(camera_index=0, user="DEFAULT", difficulty="Standard")
-    exercise_loop(camera_index=0, user="DEFAULT", difficulty="Standard")
+    import sys as _sys
+
+    # defaults
+    user = DEFAULT_USER
+    difficulty = "Standard"
+    camera_index = 0
+
+    args = _sys.argv[1:]
+    do_calibrate = ("--calibrate" in args) or ("-c" in args)
+
+    # If setup UI passes profile.json, read it
+    profile_json_path = None
+    for a in args:
+        if a.lower().endswith(".json") and os.path.exists(a):
+            profile_json_path = a
+            break
+
+    if profile_json_path:
+        try:
+            with open(profile_json_path, "r", encoding="utf-8") as f:
+                ui_profile = json.load(f)
+            user = ui_profile.get("user", user) or user
+            difficulty = ui_profile.get("difficulty", difficulty) or difficulty
+            camera_index = int(ui_profile.get("camera_index", camera_index))
+        except Exception as e:
+            print("⚠️ Failed to read UI profile.json:", e)
+
+    if do_calibrate:
+        prof = calibration_phase(camera_index=camera_index, user=user, difficulty=difficulty)
+        if prof is None:
+            print("⚠️ Calibration failed or incomplete.")
+            raise SystemExit(1)
+        exercise_loop(camera_index=camera_index, user=user, difficulty=difficulty, profile=prof)
+    else:
+        exercise_loop(camera_index=camera_index, user=user, difficulty=difficulty)
