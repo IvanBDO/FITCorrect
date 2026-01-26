@@ -1,0 +1,21 @@
+{
+  "user": "USER_1",
+  "is_new": false,
+  "age": "18 - 29 years old",
+  "sex": "Male",
+  "height": "160 - 169cm",
+  "weight": "90 - 99kg",
+  "exercise_freq": "Light (1 - 2 days/week)",
+  "injuries": [
+    "No Injury"
+  ],
+  "bmi_est_min": 31.51,
+  "bmi_est_max": 39.02,
+  "bmi_est_class": "Obese",
+  "difficulty": "Beginner",
+  "rep_goal": "Low reps (8\u201312)",
+  "has_calibration": true,
+  "camera_index": 0,
+  "last_updated": 1769405368,
+  "assigned_reps": 8
+}
