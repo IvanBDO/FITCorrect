@@ -8,10 +8,6 @@
 # - Optional no-draw / no-buzz toggles to isolate lag
 # - Non-blocking HTTP buzz (threaded fire-and-forget)
 # - Optional profiler overlay
-#
-# ✅ FIXED TREE POSE:
-# 1) plausibility_tree() now enforces "tree shape" + hips level (like calibration script)
-# 2) Tree Pose tolerance is tightened by NOT applying difficulty scaling (still uses HIT_TOL_MULT)
 
 import cv2
 import mediapipe as mp
@@ -54,7 +50,7 @@ HIT_TOL_MULT = {
     "Lunge": 1.4,
     "Push-Up": 1.4,
     "Sit-Up": 1.0,
-    "Tree Pose": 1.2,   # kept; we tighten by removing difficulty scaling for Tree Pose
+    "Tree Pose": 1.2,
 }
 
 ROM_DEEP_MARGIN_DEG = {
@@ -117,58 +113,106 @@ def draw_profiler(img, enabled):
         y += 24
 
 # ============================================================
-# ESP HTTP BUZZ (non-blocking)
+# ESP32 HTTP BUZZ (single ESP32, /mX/on endpoints)
 # ============================================================
-LIMB_IPS = {
-    "left_hand": "10.188.82.51",
-    "right_hand": "10.188.82.52",
-    "left_leg": "10.188.82.53",
-    "right_leg": "10.188.82.54",
+
+ESP32_IP = "10.188.82.221"   # <-- palitan sa actual IP ng ESP32 nyo
+HTTP_PORT = 80
+HTTP_TIMEOUT_S = 0.10       
+
+# ---- LATENCY LOGGING ----
+LAT_LOG = False
+_seq = 0
+
+
+# Keepalive / anti-spam
+HTTP_ON_COOLDOWN_S = 0.30
+HTTP_OFF_COOLDOWN_S = 0.30
+
+# Limb -> motor channel
+LIMB_TO_CH = {
+    "left_hand":  1,
+    "right_hand": 2,
+    "left_leg":   3,
+    "right_leg":  4,
 }
 
-HTTP_PORT = 80
-HTTP_TIMEOUT_S = 0.10
-HTTP_ON_COOLDOWN_S = 0.30
-_last_http_on = {k: 0.0 for k in LIMB_IPS.keys()}
+_last_http_on = {k: 0.0 for k in LIMB_TO_CH.keys()}
+_last_http_off = {k: 0.0 for k in LIMB_TO_CH.keys()}
 
 def _http_get(ip: str, path: str) -> bool:
-    url = f"http://{ip}:{HTTP_PORT}{path}"
+    global _seq
+    _seq += 1
+    seq = _seq
+
+    # high-res PC timestamps
+    t0_ns = time.perf_counter_ns()
+    t0_ms = t0_ns / 1e6
+
+    # attach seq + pc time to request
+    joiner = "&" if "?" in path else "?"
+    path2 = f"{path}{joiner}seq={seq}&pc_ns={t0_ns}&pc_ms={t0_ms:.3f}"
+
+    url = f"http://{ip}:{HTTP_PORT}{path2}"
+
     try:
         with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_S) as r:
-            r.read(8)
+            body = r.read(256).decode("utf-8", errors="ignore")
+        t1_ns = time.perf_counter_ns()
+        dt_ms = (t1_ns - t0_ns) / 1e6
+
         return True
-    except Exception:
+    except Exception as e:
+        t1_ns = time.perf_counter_ns()
+        dt_ms = (t1_ns - t0_ns) / 1e6
+
         return False
+
 
 def _http_get_async(ip: str, path: str):
     th = threading.Thread(target=_http_get, args=(ip, path), daemon=True)
     th.start()
+
+def _path_for(limb: str, action: str) -> str:
+    # action: "on" or "off"
+    ch = LIMB_TO_CH.get(limb)
+    if not ch:
+        return ""
+    return f"/m{ch}/{action}"
 
 def send_on_keepalive(limbs, enable_buzz=True):
     if not enable_buzz:
         return
     now = time.time()
     for limb in limbs:
-        ip = LIMB_IPS.get(limb)
-        if not ip:
+        path = _path_for(limb, "on")
+        if not path:
             continue
         if now - _last_http_on.get(limb, 0.0) < HTTP_ON_COOLDOWN_S:
             continue
         _last_http_on[limb] = now
-        _http_get_async(ip, "/on")
+        _http_get_async(ESP32_IP, path)
 
 def send_off(limbs, enable_buzz=True):
     if not enable_buzz:
         return
+    now = time.time()
     for limb in limbs:
-        ip = LIMB_IPS.get(limb)
-        if ip:
-            _http_get_async(ip, "/off")
+        path = _path_for(limb, "off")
+        if not path:
+            continue
+        if now - _last_http_off.get(limb, 0.0) < HTTP_OFF_COOLDOWN_S:
+            continue
+        _last_http_off[limb] = now
+        _http_get_async(ESP32_IP, path)
 
 def send_off_all(enable_buzz=True):
     if not enable_buzz:
         return
-    send_off(list(LIMB_IPS.keys()), enable_buzz=True)
+    # mabilis + simple: per motor off
+    send_off(list(LIMB_TO_CH.keys()), enable_buzz=True)
+    # or kung gusto nyo gamitin ESP endpoint:
+    # _http_get_async(ESP32_IP, "/all/off")
 
 # ============================================================
 # PROFILE IO + FALLBACK
@@ -410,7 +454,6 @@ def plausibility_situp(lm):
         return False, "Lie down"
     return True, ""
 
-# ✅ FIXED: enforce "tree shape" + hips level (matches your calibration logic)
 def plausibility_tree(lm):
     need = [
         PL.LEFT_HIP.value, PL.RIGHT_HIP.value,
@@ -419,23 +462,6 @@ def plausibility_tree(lm):
     ]
     if not _visible_all_eval(lm, need):
         return False, "Not visible"
-
-    lk = float(angle_2d(lm_xyv(lm, PL.LEFT_HIP.value)[0],
-                        lm_xyv(lm, PL.LEFT_KNEE.value)[0],
-                        lm_xyv(lm, PL.LEFT_ANKLE.value)[0]))
-    rk = float(angle_2d(lm_xyv(lm, PL.RIGHT_HIP.value)[0],
-                        lm_xyv(lm, PL.RIGHT_KNEE.value)[0],
-                        lm_xyv(lm, PL.RIGHT_ANKLE.value)[0]))
-
-    # Require one leg straight and the other bent
-    if not ((lk > 160 and rk < 160) or (rk > 160 and lk < 160)):
-        return False, "Not tree shape"
-
-    lhy = lm_xyv(lm, PL.LEFT_HIP.value)[0][1]
-    rhy = lm_xyv(lm, PL.RIGHT_HIP.value)[0][1]
-    if abs(lhy - rhy) > 0.08:
-        return False, "Hips tilted"
-
     return True, ""
 
 # ============================================================
@@ -447,6 +473,7 @@ def compute_metrics(title, lm, smoothers):
     if title == "Bodyweight Squat":
         side = squat_pick_side(lm)
         m["side"] = side
+        # knee angle
         _, hip, knee, ankle, _ = SQUAT_SIDE[side]
         h = lm_xyv(lm, hip)[0]
         k = lm_xyv(lm, knee)[0]
@@ -454,6 +481,7 @@ def compute_metrics(title, lm, smoothers):
         knee_deg = angle_2d(h, k, a)
         m["knee"] = smooth_push(smoothers["squat_knee"], knee_deg)
 
+        # hip angle
         sh = PL.LEFT_SHOULDER.value if side == "left" else PL.RIGHT_SHOULDER.value
         hip_i = PL.LEFT_HIP.value if side == "left" else PL.RIGHT_HIP.value
         knee_i = PL.LEFT_KNEE.value if side == "left" else PL.RIGHT_KNEE.value
@@ -463,6 +491,7 @@ def compute_metrics(title, lm, smoothers):
         hip_deg = angle_2d(sh_xy, hip_xy, knee_xy)
         m["hip"] = smooth_push(smoothers["squat_hip"], hip_deg)
 
+        # toe out
         ankle_i = PL.LEFT_ANKLE.value if side == "left" else PL.RIGHT_ANKLE.value
         toe_i   = PL.LEFT_FOOT_INDEX.value if side == "left" else PL.RIGHT_FOOT_INDEX.value
         a_xy = lm_xyv(lm, ankle_i)[0]
@@ -513,11 +542,8 @@ def compute_metrics(title, lm, smoothers):
 def within(cur, base, tol):
     return abs(cur - base) <= tol
 
-# ✅ FIXED: Tree Pose does NOT apply difficulty scaling (tightens acceptance)
 def within_hit(cur, base, tol, ex_name, difficulty):
     mult = float(HIT_TOL_MULT.get(ex_name, 1.2))
-    if ex_name == "Tree Pose":
-        return within(cur, base, tol * mult)
     scale = float(DIFFICULTY_SCALE.get(difficulty, 1.0))
     return within(cur, base, tol * scale * mult)
 
@@ -537,23 +563,22 @@ def evaluate(title, lm, profile, difficulty, metrics):
             return False, False, msg
 
         knee = metrics["knee"]
-        hip = metrics["hip"]
-        toe = metrics["toe"]
 
         if knee > 150.0:
             return False, False, f"Not squatting (knee {knee:.0f}°)"
 
-        ok_hip = (SQUAT_HIP_MIN <= hip <= SQUAT_HIP_MAX)
-        ok_toe = (SQUAT_TOE_MIN <= toe <= SQUAT_TOE_MAX)
+        hit = float(ex["hit_deg"])
+        tol = float(ex["tol"])
 
-        hit = float(ex["hit_deg"]); tol = float(ex["tol"])
         deep_bad = too_deep(knee, hit, difficulty)
-        ok_hit_knee = within_hit(knee, hit, tol, title, difficulty) and (not deep_bad)
-        ok_hit = bool(ok_hit_knee and ok_hip and ok_toe)
-        info = f"Knee {knee:.0f}° (hit {hit:.0f}±{tol:.0f}) | Hip {hip:.0f}° | Toe {toe:.0f}°"
+        ok_hit = within_hit(knee, hit, tol, title, difficulty) and (not deep_bad)
+
+        info = f"Knee {knee:.0f}° (hit {hit:.0f}±{tol:.0f})"
         if deep_bad:
             info = "Too deep vs calibration | " + info
+
         return ok_hit, ok_hit, info
+
 
     if title == "Lunge":
         ok_pl, msg = plausibility_lunge(lm)
@@ -599,7 +624,8 @@ def evaluate(title, lm, profile, difficulty, metrics):
         if not ok_pl:
             return False, False, msg
         d = metrics["diff"]
-        base = float(ex["hit"]); tol = float(ex["tol"])
+        base = float(ex.get("hit", ex.get("hit_deg", 0.08)))
+        tol  = float(ex.get("tol", 0.06))
         ok_hit = within_hit(d, base, tol, title, difficulty)
         info = f"Ankle diff {d:.2f} (hit {base:.2f}±{tol:.2f})"
         return ok_hit, ok_hit, info
@@ -766,7 +792,14 @@ def exercise_loop(cap, user, difficulty, assigned_reps, pose_every_n=2,
                 continue
 
             frame = cv2.flip(frame, 1)
-            img = frame
+
+            # ✅ force a bigger working canvas (prevents huge text when fullscreen stretches)
+            TARGET_W, TARGET_H = 1280, 720
+            frame = cv2.resize(frame, (TARGET_W, TARGET_H), interpolation=cv2.INTER_LINEAR)
+
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            res = pose.process(rgb)
+            img = frame  # no need to copy
 
             title = exercises[ex_idx]
 
@@ -785,18 +818,18 @@ def exercise_loop(cap, user, difficulty, assigned_reps, pose_every_n=2,
                 t = time.perf_counter()
                 draw_profiler(img, profiler)
                 show_frame(img)
-                key = cv2.waitKeyEx(1)
+                key = cv2.waitKey(1) & 0xFF
                 prof["ui_ms"].append(_ms(time.perf_counter() - t))
                 prof["loop_ms"].append(_ms(time.perf_counter() - t0))
 
-                if key in (81, 2424832):   # Left arrow
+                if key == ord("q"):
                     send_off_all(enable_buzz=enable_buzz)
                     break
-                if key in (83, 2555904):   # Right arrow
+                if key == ord("n"):
                     in_rest = False
                     reset_for_next()
                     ex_idx = (ex_idx + 1) % len(exercises)
-                if key in (82, 2490368):   # Up arrow
+                if key == ord("f"):
                     try:
                         cur = cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN)
                         make_fullscreen(WINDOW_NAME, enable=(cur != cv2.WINDOW_FULLSCREEN))
@@ -816,6 +849,7 @@ def exercise_loop(cap, user, difficulty, assigned_reps, pose_every_n=2,
             # LOGIC + DRAW
             t = time.perf_counter()
             cv2.putText(img, f"Exercise: {title}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+            cv2.putText(img, "Keys: Q=Quit  F=Fullscreen  N=Skip", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (230, 230, 230), 2)
 
             if title == "Tree Pose":
                 cv2.putText(img, f"Target: hold {tree_hold}s", (20, 105), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (230, 230, 230), 2)
@@ -906,16 +940,25 @@ def exercise_loop(cap, user, difficulty, assigned_reps, pose_every_n=2,
                     cv2.putText(img, info, (20, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (230, 230, 230), 2)
 
                 # BUZZ
+                # BUZZ
                 limbs = limbs_for_bad_form(title, metrics)
+
                 if display_good is False:
+                    if LAT_LOG:
+                        td_ns = time.perf_counter_ns()
+                        print(f"[PC] DETECT_BAD ex={title} limbs={limbs} pc_ns={td_ns}")
                     send_on_keepalive(limbs, enable_buzz=enable_buzz)
+
                 elif display_good is True:
-                    if last_display.get(title) is not True:
-                        send_off(limbs, enable_buzz=enable_buzz)
+                    # stop the limbs when form becomes good
+                    send_off(limbs, enable_buzz=enable_buzz)
+
                 else:
+                    # not visible -> stop
                     send_off(limbs, enable_buzz=enable_buzz)
 
                 last_display[title] = display_good
+
 
             else:
                 cv2.putText(img, "No body detected", (20, 165),
@@ -930,18 +973,18 @@ def exercise_loop(cap, user, difficulty, assigned_reps, pose_every_n=2,
             t = time.perf_counter()
             draw_profiler(img, profiler)
             show_frame(img)
-            key = cv2.waitKeyEx(1)
+            key = cv2.waitKey(1) & 0xFF
             prof["ui_ms"].append(_ms(time.perf_counter() - t))
             prof["loop_ms"].append(_ms(time.perf_counter() - t0))
 
-            if key in (81, 2424832):  # Left arrow
+            if key == ord("q"):
                 send_off_all(enable_buzz=enable_buzz)
                 break
-            elif key in (83, 2555904):  # Right arrow
+            elif key == ord("n"):
                 send_off_all(enable_buzz=enable_buzz)
                 reset_for_next()
                 ex_idx = (ex_idx + 1) % len(exercises)
-            elif key in (82, 2490368):  # Up arrow
+            elif key == ord("f"):
                 try:
                     cur = cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN)
                     make_fullscreen(WINDOW_NAME, enable=(cur != cv2.WINDOW_FULLSCREEN))
@@ -986,7 +1029,7 @@ if __name__ == "__main__":
         print("⚠️ Camera not available.")
         raise SystemExit(1)
 
-    make_fullscreen(WINDOW_NAME, False)
+    make_fullscreen(WINDOW_NAME, True)
 
     try:
         exercise_loop(

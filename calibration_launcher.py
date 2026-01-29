@@ -367,7 +367,7 @@ def plausibility_tree(lm):
 def _calibrate_one_metric(
     cap, pose, title,
     required_indices, draw_fn, metric_fn, accept_fn,
-    accept_range=None, max_mad=MAX_MAD_DEG
+    accept_range=None, max_mad=MAX_MAD_DEG, tol_floor=0.03
 ):
     samples = []
     hold_start = None
@@ -378,12 +378,19 @@ def _calibrate_one_metric(
             continue
 
         frame = cv2.flip(frame, 1)
+
+        # ✅ force a bigger working canvas (prevents huge text when fullscreen stretches)
+        TARGET_W, TARGET_H = 1280, 720
+        frame = cv2.resize(frame, (TARGET_W, TARGET_H), interpolation=cv2.INTER_LINEAR)
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         res = pose.process(rgb)
-        img = frame.copy()
+        img = frame  # no need to copy
 
         cv2.putText(img, f"Calibration: {title}", (30, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+        cv2.putText(img, "Keys: N=Skip  Q=Quit  F=Toggle Fullscreen", (30, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (230, 230, 230), 2)
 
         if res is not None and res.pose_landmarks:
             lm = res.pose_landmarks.landmark
@@ -423,7 +430,7 @@ def _calibrate_one_metric(
                                 hold_start = None
                                 samples.clear()
                             else:
-                                tol = max(8.0, 2.0 * s)
+                                tol = max(float(tol_floor), 2.0 * s)
                                 return m, tol
                 else:
                     hold_start = None
@@ -442,12 +449,12 @@ def _calibrate_one_metric(
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 2)
 
         show_frame(img)
-        key = cv2.waitKeyEx(1)
-        if key in (81, 2424832):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
             return None
-        if key in (83, 2555904):
+        if key == ord("n"):
             return "SKIP"
-        if key in (82, 2490368):
+        if key == ord("f"):
             try:
                 cur = cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN)
                 make_fullscreen(WINDOW_NAME, enable=(cur != cv2.WINDOW_FULLSCREEN))
@@ -661,7 +668,7 @@ if __name__ == "__main__":
         print("⚠️ Camera not available.")
         raise SystemExit(1)
 
-    make_fullscreen(WINDOW_NAME, False)
+    make_fullscreen(WINDOW_NAME, True)
 
     try:
         prof = calibration_phase(cap=cap, user=user, difficulty=difficulty)

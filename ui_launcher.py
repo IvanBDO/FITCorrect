@@ -307,9 +307,21 @@ class FitCorrectUI(ctk.CTk):
         ctk.set_appearance_mode("Light")
         self.title("FitCorrect")
 
-        # ✅ Fullscreen launcher
+        # ✅ Fullscreen launcher (Wayland-friendly, still uses attributes fullscreen)
         self.resizable(True, True)
-        self.attributes("-fullscreen", True)
+
+        def _wayland_fullscreen_retry(n=12):
+            try:
+                self.attributes("-fullscreen", True)  # master method
+                self.lift()
+                self.focus_force()
+                self.update_idletasks()
+            except Exception:
+                pass
+            if n > 0:
+                self.after(120, lambda: _wayland_fullscreen_retry(n - 1))
+
+        self.after(0, _wayland_fullscreen_retry)
 
         self.configure(fg_color=THEME_BG_WHITE)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -432,7 +444,8 @@ class FitCorrectUI(ctk.CTk):
     def _toggle_fullscreen(self):
         try:
             cur = bool(self.attributes("-fullscreen"))
-            self.attributes("-fullscreen", not cur)
+            self.after(0, lambda: self.attributes("-fullscreen", True))
+            self.after(50, lambda: (self.lift(), self.focus_force()))
         except Exception:
             pass
 
@@ -754,7 +767,7 @@ class FitCorrectUI(ctk.CTk):
 
             del_btn = ctk.CTkButton(
                 row,
-                text="🗑",
+                text="X",
                 fg_color="#EF4444",
                 text_color="white",
                 font=("Arial", 28, "bold"),
